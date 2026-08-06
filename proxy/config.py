@@ -73,6 +73,7 @@ class ProxyConfig:
     fake_tls_domain: str = ''
     proxy_protocol: bool = False
     force_test_dc: bool = False
+    max_connections: int = 2048
 
 
 proxy_config = ProxyConfig()
@@ -195,6 +196,56 @@ def start_cfproxy_domain_refresh() -> None:
             refresh_cfproxy_domains()
 
     threading.Thread(target=_loop, daemon=True, name='cfproxy-domains-refresh').start()
+
+
+def default_secret_path() -> str:
+    base = os.environ.get('XDG_CONFIG_HOME') or os.path.join(
+        os.path.expanduser('~'), '.config')
+    return os.path.join(base, 'tg-ws-proxy', 'secret')
+
+
+def load_or_create_secret(path: str) -> str:
+    """
+    Keep one secret across restarts so links already handed out to devices
+    stay valid. Stored 0600 — anyone who can read it can use the proxy.
+    """
+    try:
+        with open(path, 'r', encoding='ascii') as f:
+            secret = f.read().strip()
+        if len(secret) == 32:
+            bytes.fromhex(secret)
+            return secret
+        log.warning("Secret file %s is malformed, regenerating", path)
+    except FileNotFoundError:
+        pass
+    except ValueError:
+        log.warning("Secret file %s is not valid hex, regenerating", path)
+    except OSError as exc:
+        raise SystemExit(f"Cannot read secret file {path}: {exc}")
+
+    secret = os.urandom(16).hex()
+    directory = os.path.dirname(os.path.abspath(path))
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, secret.encode('ascii'))
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        raise SystemExit(f"Cannot write secret file {path}: {exc}")
+
+    log.info("Generated a new persistent secret in %s", path)
+    return secret
+
+
+def stop_cfproxy_domain_refresh() -> None:
+    """Stop the background refresher, e.g. after CF fallback was turned off."""
+    _refresh_stop.set()
 
 
 def parse_dc_ip_list(dc_ip_list: List[str]) -> Dict[int, str]:

@@ -22,7 +22,9 @@ if __name__ == '__main__' and (__package__ is None or __package__ == ''):
 
 from .utils import *
 from .stats import stats
-from .config import proxy_config, parse_dc_ip_list, start_cfproxy_domain_refresh, coerce_domain_list
+from .config import (proxy_config, parse_dc_ip_list, start_cfproxy_domain_refresh,
+                     stop_cfproxy_domain_refresh, coerce_domain_list,
+                     load_or_create_secret, default_secret_path)
 from .bridge import MsgSplitter, CryptoCtx, do_fallback, bridge_ws_reencrypt
 from .raw_websocket import RawWebSocket, WsHandshakeError, set_sock_opts
 from .fake_tls import proxy_to_masking_domain, verify_client_hello, build_server_hello, FakeTlsStream, TLS_RECORD_HANDSHAKE
@@ -38,6 +40,9 @@ DC_FAIL_COOLDOWN = 60.0
 WS_FAIL_TIMEOUT = 2.0
 LISTENER_CHECK_INTERVAL = 5.0
 LISTENER_RESTART_DELAY = 1.0
+BAD_DRAIN_TIMEOUT = 30.0
+BAD_DRAIN_LIMIT = 1024 * 1024
+REJECT_LOG_INTERVAL = 60.0
 ws_blacklist: Set[str] = set()
 dc_fail_until: Dict[str, float] = {}
 ip_fail_until: Dict[str, float] = {}
@@ -105,6 +110,31 @@ def _generate_relay_init(proto_tag: bytes, dc_idx: int) -> bytes:
 
 
 
+
+
+async def _drain_bad_client(reader, label):
+    """
+    Swallow whatever a client that failed the handshake keeps sending, instead
+    of closing at once: an instant close tells a scanner it found a proxy.
+    Bounded in time and volume, otherwise a probe could pin the task open and
+    hold a connection slot forever.
+    """
+    drained = 0
+
+    async def _drain():
+        nonlocal drained
+        while drained < BAD_DRAIN_LIMIT:
+            chunk = await reader.read(4096)
+            if not chunk:
+                return
+            drained += len(chunk)
+
+    try:
+        await asyncio.wait_for(_drain(), timeout=BAD_DRAIN_TIMEOUT)
+    except Exception:
+        pass
+    log.debug("[%s] bad-handshake client drained (%s)", label,
+              human_bytes(drained))
 
 
 async def _read_client_init(reader, writer, secret, label, masking):
@@ -267,11 +297,7 @@ async def _handle_client(reader, writer, secret: bytes):
         if result is None:
             stats.connections_bad += 1
             log.warning("[%s] bad handshake (wrong secret or proto)", label)
-            try:
-                while await clt_reader.read(4096):
-                    pass
-            except Exception:
-                pass
+            await _drain_bad_client(clt_reader, label)
             return
 
         dc, is_media, proto_tag, client_dec_prekey_iv = result
@@ -474,15 +500,39 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     ip_fail_until.clear()
     _client_tasks.clear()
 
-    user_cf_domains = proxy_config.cfproxy_user_domains
-    if user_cf_domains:
-        balancer.update_domains_list(user_cf_domains)
+    # Only reach out to GitHub when the CF fallback can actually be used:
+    # --no-cfproxy must mean no outbound requests for the domain list either.
+    if proxy_config.fallback_cfproxy:
+        user_cf_domains = proxy_config.cfproxy_user_domains
+        if user_cf_domains:
+            balancer.update_domains_list(user_cf_domains)
+        else:
+            start_cfproxy_domain_refresh()
     else:
-        start_cfproxy_domain_refresh()
+        stop_cfproxy_domain_refresh()
 
     secret_bytes = bytes.fromhex(proxy_config.secret)
 
+    last_reject_log = 0.0
+
     def client_cb(r, w):
+        nonlocal last_reject_log
+        limit = proxy_config.max_connections
+        if limit and len(_client_tasks) >= limit:
+            # Drop instead of queueing: an unbounded accept loop on a public
+            # port is a free way to exhaust memory and fds.
+            stats.connections_rejected += 1
+            now = time.monotonic()
+            if now - last_reject_log >= REJECT_LOG_INTERVAL:
+                last_reject_log = now
+                log.warning(
+                    "Connection limit reached (%d), rejecting new clients "
+                    "(%d rejected so far)", limit, stats.connections_rejected)
+            try:
+                w.close()
+            except Exception:
+                pass
+            return
         task = asyncio.create_task(_handle_client(r, w, secret_bytes))
         _client_tasks.add(task)
         task.add_done_callback(_client_tasks.discard)
@@ -498,15 +548,8 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
 
     link_host = get_link_host(proxy_config.host)
     ftls = proxy_config.fake_tls_domain
-    dd_link = (f"tg://proxy?server={link_host}"
-               f"&port={proxy_config.port}"
-               f"&secret=dd{proxy_config.secret}")
-    ee_link = ""
-    if ftls:
-        domain_hex = ftls.encode('ascii').hex()
-        ee_link = (f"tg://proxy?server={link_host}"
-                   f"&port={proxy_config.port}"
-                   f"&secret=ee{proxy_config.secret}{domain_hex}")
+    tg_link, tme_link = build_proxy_links(
+        proxy_config.host, proxy_config.port, proxy_config.secret, ftls)
 
     log.info("=" * 60)
     log.info("  Telegram MTProto WS Bridge Proxy")
@@ -524,12 +567,15 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     if proxy_config.cfproxy_worker_domains:
         log.info("  CF worker:     enabled (%s)",
                  ", ".join(proxy_config.cfproxy_worker_domains))
+    if proxy_config.max_connections:
+        log.info("  Max clients:   %d", proxy_config.max_connections)
     log.info("=" * 60)
-    log.info("  Connect:")
-    if ftls:
-        log.info("    %s", ee_link)
-    else:
-        log.info("    %s", dd_link)
+    log.info("  Share this link (clickable when sent in a Telegram chat):")
+    log.info("    %s", tme_link)
+    log.info("  Local link:")
+    log.info("    %s", tg_link)
+    if proxy_config.host == '0.0.0.0':
+        log.info("  Devices must be on the same network as %s", link_host)
     log.info("=" * 60)
 
     async def log_stats():
@@ -678,6 +724,16 @@ def main():
     ap.add_argument('--proxy-protocol', action='store_true',
                     help='Accept PROXY protocol v1 header '
                          '(for use behind nginx/haproxy with proxy_protocol on)')
+    ap.add_argument('--max-connections', type=int, default=2048, metavar='N',
+                    help='Max simultaneous client connections, 0 = unlimited '
+                         '(default 2048)')
+    ap.add_argument('--lan', action='store_true',
+                    help='Serve the whole local network: listen on 0.0.0.0 and '
+                         'keep a persistent secret in --secret-file, so links '
+                         'handed out to devices survive a restart')
+    ap.add_argument('--secret-file', type=str, default=None, metavar='PATH',
+                    help='Read the secret from PATH, generating and storing '
+                         'one if the file does not exist. Implied by --lan.')
     args = ap.parse_args()
 
     if not args.dc_ip:
@@ -699,12 +755,15 @@ def main():
         except ValueError:
             log.error("Secret must be valid hex")
             sys.exit(1)
+    elif args.secret_file or args.lan:
+        secret_hex = load_or_create_secret(
+            args.secret_file or default_secret_path())
     else:
         secret_hex = os.urandom(16).hex()
         log.info("Generated secret: %s", secret_hex)
 
     proxy_config.port = args.port
-    proxy_config.host = args.host
+    proxy_config.host = '0.0.0.0' if args.lan else args.host
     proxy_config.secret = secret_hex
     proxy_config.dc_redirects = dc_redirects
     proxy_config.buffer_size = max(4, args.buf_kb) * 1024
@@ -715,6 +774,7 @@ def main():
     proxy_config.fake_tls_domain = args.fake_tls_domain.strip()
     proxy_config.proxy_protocol = args.proxy_protocol
     proxy_config.force_test_dc = args.force_test_dc
+    proxy_config.max_connections = max(0, args.max_connections)
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     log_fmt = logging.Formatter('%(asctime)s  %(levelname)-5s  %(message)s',
