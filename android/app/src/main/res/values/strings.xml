@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TG WS Proxy</string>
+
+    <string name="status_running">Прокси работает</string>
+    <string name="status_stopped">Прокси остановлен</string>
+    <string name="status_starting">Запуск…</string>
+    <string name="status_error">Ошибка: %1$s</string>
+
+    <string name="action_start">Запустить</string>
+    <string name="action_stop">Остановить</string>
+    <string name="action_open">Подключить в Telegram</string>
+    <string name="action_copy">Скопировать секрет</string>
+
+    <string name="details">Сервер: 127.0.0.1\nПорт: %1$d\nСекрет: %2$s</string>
+    <string name="hint">Нажмите «Подключить в Telegram» — откроется окно подключения с уже заполненными данными. Прокси работает, пока висит уведомление.</string>
+
+    <string name="channel_name">Состояние прокси</string>
+    <string name="copied">Секрет скопирован</string>
+    <string name="no_telegram">Не удалось открыть Telegram. Добавьте прокси вручную: тип MTProto, сервер 127.0.0.1</string>
+</resources>
