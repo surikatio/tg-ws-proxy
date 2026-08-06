@@ -23,16 +23,32 @@ Telegram (телефон) → 127.0.0.1:1443 → приложение → WebSoc
 
 ## Сборка
 
-Нужны Android Studio (или Android SDK) и интернет: Gradle скачает Chaquopy и рантайм Python.
+Нужны Android Studio (или Android SDK) и интернет: Gradle скачает Chaquopy и рантайм Python. Python-пакеты из pypi **не требуются** — см. про `javax.crypto` ниже.
 
 ```bash
 cd android
 ./gradlew assembleDebug          # Windows: gradlew.bat assembleDebug
 ```
 
-APK окажется в `android/app/build/outputs/apk/debug/`.
+APK окажется в `android/app/build/outputs/apk/debug/`. Проще открыть папку `android/` в Android Studio и нажать Run.
 
-Проще открыть папку `android/` в Android Studio и нажать Run — она сама подтянет Gradle нужной версии.
+> [!WARNING]
+> **Путь к проекту не должен содержать кириллицу.** Android Gradle Plugin отказывается собирать из каталогов с не-ASCII символами (`Your project path contains non-ASCII characters`). Если репозиторий лежит, например, в `C:\Users\...\Документы\питон проекты\`, скопируйте `android/` и `proxy/` в путь вида `C:\build\` и собирайте оттуда — структура должна сохраниться:
+>
+> ```
+> C:\build\android\   ← сюда android/
+> C:\build\proxy\     ← сюда proxy/
+> ```
+
+Файл `local.properties` создаётся Android Studio автоматически; вручную путь пишется с прямыми слэшами, иначе Java воспримет `\U`, `\t` и подобное как escape-последовательности:
+
+```properties
+sdk.dir=C:/Users/<user>/AppData/Local/Android/Sdk
+```
+
+### Почему нет зависимостей pip
+
+Колеса `cryptography` для Android не существует, а сборка из исходников требует Rust. Поэтому `proxy/_aes.py` получил третий бэкенд — через `javax.crypto`, который есть на любом Android-устройстве. Ядро выбирает его автоматически: `cryptography` → `javax.crypto` → системный `libcrypto`. Побочный плюс: сборке не нужен доступ к pypi.org.
 
 Установка на подключённый телефон:
 
@@ -58,4 +74,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Состояние
 
-Python-мост протестирован на десктопе: запуск, приём подключений, статистика и корректная остановка с освобождением порта работают. Kotlin-часть и сборка APK **не проверялись на устройстве** — нужен прогон в Android Studio. Ожидаемые места для правок при первой сборке: версии плагинов в `build.gradle.kts` и наличие колеса `cryptography` для выбранной версии Python в репозитории Chaquopy (если его нет, `proxy/_aes.py` умеет работать и без него — но тогда потребуется бэкенд через `javax.crypto`).
+**Собрано:** `assembleDebug` проходит, APK ~39 МБ для `arm64-v8a` и `x86_64`. Внутри лежит весь пакет `proxy/` и `proxy_bridge.py`, Kotlin компилируется без ошибок.
+
+**Проверено:** Python-мост протестирован на десктопе — запуск, приём подключений, статистика, корректная остановка с освобождением порта.
+
+**Не проверено:** приложение не запускалось на реальном устройстве. Не подтверждены три вещи, которые стоит проверить первым делом:
+
+1. работает ли бэкенд `javax.crypto` под Chaquopy (конвертация `bytes` ↔ `byte[]` в `_aes.py`);
+2. переживает ли foreground-сервис засыпание устройства;
+3. открывается ли `tg://proxy`-ссылка в Telegram с заполненными полями.
+
+Логи с устройства: `adb logcat -s ProxyService python.stdout python.stderr`.

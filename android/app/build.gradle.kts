@@ -46,11 +46,10 @@ chaquopy {
     defaultConfig {
         version = "3.11"
 
-        // The proxy core is pure Python plus cryptography; _aes.py falls back
-        // to other backends, but the wheel is available so use it.
-        pip {
-            install("cryptography==43.0.3")
-        }
+        // No pip dependencies on purpose. There is no cryptography wheel for
+        // Android, and building it needs a Rust toolchain; proxy/_aes.py
+        // instead falls back to javax.crypto, which every device ships.
+        // This also keeps the build working without reaching pypi.org.
     }
 
     sourceSets {
@@ -73,7 +72,11 @@ val syncProxyCore = tasks.register<Copy>("syncProxyCore") {
     into(layout.buildDirectory.dir("python-src/proxy"))
 }
 
-tasks.named("preBuild") {
+// Chaquopy's merge task consumes that directory, so it has to wait for the
+// copy; depending on preBuild alone leaves the order undefined.
+tasks.matching {
+    it.name.startsWith("merge") && it.name.endsWith("PythonSources")
+}.configureEach {
     dependsOn(syncProxyCore)
 }
 

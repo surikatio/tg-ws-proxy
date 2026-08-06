@@ -1,20 +1,88 @@
 """
 AES-CTR shim.
 
-Prefers `cryptography` if available (desktop / Docker). Falls back to a
-ctypes wrapper over the system OpenSSL `libcrypto` for environments where
-installing `cryptography` is painful (Entware on routers, embedded boxes
-without a Rust toolchain). The public surface mimics the small subset of
+Prefers `cryptography` if available (desktop / Docker). Falls back to
+javax.crypto on Android, then to a ctypes wrapper over the system OpenSSL
+`libcrypto` for environments where installing `cryptography` is painful
+(Entware on routers, embedded boxes without a Rust toolchain). The public
+surface mimics the small subset of
 `cryptography.hazmat.primitives.ciphers` that this project actually uses:
     Cipher(algorithms.AES(key), modes.CTR(iv)).encryptor().update(data)
 """
 from __future__ import annotations
 
+_BACKEND = ""
+
 try:
     from cryptography.hazmat.primitives.ciphers import (  # noqa: F401
         Cipher, algorithms, modes,
     )
+    _BACKEND = "cryptography"
 except ImportError:
+    try:
+        # Android (Chaquopy). There is no cryptography wheel for Android and
+        # no reachable libcrypto, but every device ships a JCE provider.
+        from javax.crypto import Cipher as _JCipher  # type: ignore[import]
+        from javax.crypto.spec import (  # type: ignore[import]
+            IvParameterSpec, SecretKeySpec,
+        )
+        _BACKEND = "jce"
+    except ImportError:
+        _BACKEND = "libcrypto"
+
+if _BACKEND == "jce":
+    class algorithms:  # type: ignore[no-redef]
+        class AES:
+            __slots__ = ("key",)
+
+            def __init__(self, key: bytes):
+                if len(key) not in (16, 24, 32):
+                    raise ValueError("AES key must be 16/24/32 bytes")
+                self.key = bytes(key)
+
+    class modes:  # type: ignore[no-redef]
+        class CTR:
+            __slots__ = ("iv",)
+
+            def __init__(self, iv: bytes):
+                if len(iv) != 16:
+                    raise ValueError("CTR IV must be 16 bytes")
+                self.iv = bytes(iv)
+
+    class _JceCtrStream:
+        """Cipher.update() keeps CTR state across calls, exactly as needed."""
+        __slots__ = ("_cipher",)
+
+        def __init__(self, key: bytes, iv: bytes):
+            cipher = _JCipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(_JCipher.ENCRYPT_MODE,
+                        SecretKeySpec(key, "AES"),
+                        IvParameterSpec(iv))
+            self._cipher = cipher
+
+        def update(self, data: bytes) -> bytes:
+            if not data:
+                return b""
+            return bytes(self._cipher.update(data))
+
+    class Cipher:  # type: ignore[no-redef]
+        __slots__ = ("_key", "_iv")
+
+        def __init__(self, algorithm, mode):
+            if not isinstance(algorithm, algorithms.AES):
+                raise TypeError("only AES is supported")
+            if not isinstance(mode, modes.CTR):
+                raise TypeError("only CTR mode is supported")
+            self._key = algorithm.key
+            self._iv = mode.iv
+
+        def encryptor(self) -> _JceCtrStream:
+            return _JceCtrStream(self._key, self._iv)
+
+        # CTR is symmetric — decryption == encryption with the same keystream.
+        decryptor = encryptor
+
+elif _BACKEND == "libcrypto":
     import ctypes
     import ctypes.util
 
