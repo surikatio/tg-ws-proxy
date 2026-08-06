@@ -45,6 +45,7 @@
   - **[Linux](./README.linux.md)**
   - **[Docker](./README.docker.md)**
   - **[Сервер для локальной сети](./LanServer.md)**
+  - **[Прозрачный режим (без настройки клиентов)](./Transparent.md)**
 - [Настройка Cloudflare Worker'а (бесплатный аналог CF-прокси)](./CfWorker.md)
 - [Настройка Cloudflare-домена (CF-прокси)](./CfProxy.md)
 - [Тестовое окружение Telegram (тестовые DC)](./TestDc.md)

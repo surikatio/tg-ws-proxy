@@ -69,6 +69,25 @@ def human_bytes(n: int) -> str:
     return f"{n:.1f}TB"
 
 
+SO_ORIGINAL_DST = 80
+
+
+def get_original_dst(sock) -> Optional[Tuple[str, int]]:
+    """
+    Where the client actually meant to go, before netfilter redirected it here.
+    Linux/netfilter only — returns None everywhere else.
+    """
+    try:
+        data = sock.getsockopt(_socket.SOL_IP, SO_ORIGINAL_DST, 16)
+    except (OSError, AttributeError, NameError):
+        return None
+    try:
+        port = int.from_bytes(data[2:4], 'big')
+        return _socket.inet_ntoa(data[4:8]), port
+    except (ValueError, OSError):
+        return None
+
+
 def build_proxy_links(host: str, port: int, secret: str,
                       fake_tls_domain: str = '') -> Tuple[str, str]:
     """

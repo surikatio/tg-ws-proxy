@@ -74,6 +74,7 @@ class ProxyConfig:
     proxy_protocol: bool = False
     force_test_dc: bool = False
     max_connections: int = 2048
+    transparent: bool = False
 
 
 proxy_config = ProxyConfig()

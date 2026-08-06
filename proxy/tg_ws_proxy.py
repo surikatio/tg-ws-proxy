@@ -25,7 +25,8 @@ from .stats import stats
 from .config import (proxy_config, parse_dc_ip_list, start_cfproxy_domain_refresh,
                      stop_cfproxy_domain_refresh, coerce_domain_list,
                      load_or_create_secret, default_secret_path)
-from .bridge import MsgSplitter, CryptoCtx, do_fallback, bridge_ws_reencrypt
+from .bridge import (MsgSplitter, CryptoCtx, do_fallback, bridge_ws_reencrypt,
+                     passthrough)
 from .raw_websocket import RawWebSocket, WsHandshakeError, set_sock_opts
 from .fake_tls import proxy_to_masking_domain, verify_client_hello, build_server_hello, FakeTlsStream, TLS_RECORD_HANDSHAKE
 from .balancer import balancer
@@ -48,12 +49,21 @@ dc_fail_until: Dict[str, float] = {}
 ip_fail_until: Dict[str, float] = {}
 
 
-def _try_handshake(handshake: bytes, secret: bytes) -> Optional[Tuple[int, bool, bytes, bytes]]:
+def _try_handshake(handshake: bytes,
+                   secret: Optional[bytes]) -> Optional[Tuple[int, bool, bytes, bytes]]:
+    """
+    secret=None is the transparent case: the client believes it is talking to
+    a datacenter, so its init is plain obfuscated2 and the key is the prekey
+    itself, without the proxy secret mixed in.
+    """
     dec_prekey_and_iv = handshake[SKIP_LEN:SKIP_LEN + PREKEY_LEN + IV_LEN]
     dec_prekey = dec_prekey_and_iv[:PREKEY_LEN]
     dec_iv = dec_prekey_and_iv[PREKEY_LEN:]
 
-    dec_key = hashlib.sha256(dec_prekey + secret).digest()
+    if secret is None:
+        dec_key = dec_prekey
+    else:
+        dec_key = hashlib.sha256(dec_prekey + secret).digest()
 
     dec_iv_int = int.from_bytes(dec_iv, 'big')
     decryptor = Cipher(
@@ -236,14 +246,20 @@ async def _read_client_init(reader, writer, secret, label, masking):
 def _build_crypto_ctx(client_dec_prekey_iv, secret, relay_init):
     # key = SHA256(prekey + secret), iv from handshake
     # "dec" = decrypt data from client; "enc" = encrypt data to client
+    # secret=None (transparent mode): raw prekey, same scheme as the relay side
     clt_dec_prekey = client_dec_prekey_iv[:PREKEY_LEN]
     clt_dec_iv = client_dec_prekey_iv[PREKEY_LEN:]
-    clt_dec_key = hashlib.sha256(clt_dec_prekey + secret).digest()
 
     clt_enc_prekey_iv = client_dec_prekey_iv[::-1]
-    clt_enc_key = hashlib.sha256(
-        clt_enc_prekey_iv[:PREKEY_LEN] + secret).digest()
     clt_enc_iv = clt_enc_prekey_iv[PREKEY_LEN:]
+
+    if secret is None:
+        clt_dec_key = clt_dec_prekey
+        clt_enc_key = clt_enc_prekey_iv[:KEY_LEN]
+    else:
+        clt_dec_key = hashlib.sha256(clt_dec_prekey + secret).digest()
+        clt_enc_key = hashlib.sha256(
+            clt_enc_prekey_iv[:PREKEY_LEN] + secret).digest()
 
     clt_decryptor = Cipher(
         algorithms.AES(clt_dec_key), modes.CTR(clt_dec_iv)
@@ -277,11 +293,14 @@ def _build_crypto_ctx(client_dec_prekey_iv, secret, relay_init):
     return CryptoCtx(clt_decryptor, clt_encryptor, tg_encryptor, tg_decryptor)
 
 
-async def _handle_client(reader, writer, secret: bytes):
+async def _handle_client(reader, writer, secret: Optional[bytes]):
     stats.connections_total += 1
     stats.connections_active += 1
     peer = writer.get_extra_info('peername')
     label = f"{peer[0]}:{peer[1]}" if peer else "?"
+    orig_dst = None
+    if proxy_config.transparent:
+        orig_dst = get_original_dst(writer.get_extra_info('socket'))
 
     set_sock_opts(writer.transport, proxy_config.buffer_size)
 
@@ -295,6 +314,16 @@ async def _handle_client(reader, writer, secret: bytes):
 
         result = _try_handshake(handshake, secret)
         if result is None:
+            stats.connections_bad += 1
+            if orig_dst:
+                # Redirected here by netfilter but not MTProto — most likely
+                # web/CDN traffic sharing a Telegram subnet. Pass it along
+                # instead of breaking it.
+                log.debug("[%s] not MTProto -> passthrough to %s:%d",
+                          label, orig_dst[0], orig_dst[1])
+                await passthrough(clt_reader, clt_writer, handshake,
+                                  orig_dst[0], orig_dst[1], label)
+                return
             stats.connections_bad += 1
             log.warning("[%s] bad handshake (wrong secret or proto)", label)
             await _drain_bad_client(clt_reader, label)
@@ -511,7 +540,10 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     else:
         stop_cfproxy_domain_refresh()
 
-    secret_bytes = bytes.fromhex(proxy_config.secret)
+    # Transparent clients think they are talking to a datacenter and know
+    # nothing about a proxy secret.
+    secret_bytes = (None if proxy_config.transparent
+                    else bytes.fromhex(proxy_config.secret))
 
     last_reject_log = 0.0
 
@@ -554,7 +586,10 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     log.info("=" * 60)
     log.info("  Telegram MTProto WS Bridge Proxy")
     log.info("  Listening on   %s:%d", proxy_config.host, proxy_config.port)
-    log.info("  Secret:        %s", proxy_config.secret)
+    if proxy_config.transparent:
+        log.info("  Mode:          transparent (no client configuration)")
+    else:
+        log.info("  Secret:        %s", proxy_config.secret)
     if ftls:
         log.info("  Fake TLS:      %s", ftls)
     log.info("  Target DC IPs:")
@@ -570,12 +605,17 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     if proxy_config.max_connections:
         log.info("  Max clients:   %d", proxy_config.max_connections)
     log.info("=" * 60)
-    log.info("  Share this link (clickable when sent in a Telegram chat):")
-    log.info("    %s", tme_link)
-    log.info("  Local link:")
-    log.info("    %s", tg_link)
-    if proxy_config.host == '0.0.0.0':
-        log.info("  Devices must be on the same network as %s", link_host)
+    if proxy_config.transparent:
+        log.info("  Clients need no setup — route Telegram subnets here and")
+        log.info("  redirect them to port %d. See docs/Transparent.md",
+                 proxy_config.port)
+    else:
+        log.info("  Share this link (clickable when sent in a Telegram chat):")
+        log.info("    %s", tme_link)
+        log.info("  Local link:")
+        log.info("    %s", tg_link)
+        if proxy_config.host == '0.0.0.0':
+            log.info("  Devices must be on the same network as %s", link_host)
     log.info("=" * 60)
 
     async def log_stats():
@@ -724,6 +764,11 @@ def main():
     ap.add_argument('--proxy-protocol', action='store_true',
                     help='Accept PROXY protocol v1 header '
                          '(for use behind nginx/haproxy with proxy_protocol on)')
+    ap.add_argument('--transparent', action='store_true',
+                    help='Transparent mode: serve clients that were redirected '
+                         'here by netfilter and know nothing about a proxy, so '
+                         'Telegram needs no setup on them. Linux only, requires '
+                         'routing + REDIRECT rules; see docs/Transparent.md')
     ap.add_argument('--max-connections', type=int, default=2048, metavar='N',
                     help='Max simultaneous client connections, 0 = unlimited '
                          '(default 2048)')
@@ -775,6 +820,20 @@ def main():
     proxy_config.proxy_protocol = args.proxy_protocol
     proxy_config.force_test_dc = args.force_test_dc
     proxy_config.max_connections = max(0, args.max_connections)
+    proxy_config.transparent = args.transparent
+
+    if args.transparent:
+        if sys.platform != 'linux':
+            log.error("--transparent needs netfilter and only works on Linux")
+            sys.exit(1)
+        if proxy_config.fake_tls_domain:
+            log.error("--transparent and --fake-tls-domain are incompatible: "
+                      "redirected clients speak plain obfuscated MTProto")
+            sys.exit(1)
+        # Default the listener to the LAN unless the user pinned an address:
+        # redirected packets arrive on whichever interface faces the clients.
+        if not args.lan and args.host == '127.0.0.1':
+            proxy_config.host = '0.0.0.0'
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     log_fmt = logging.Formatter('%(asctime)s  %(levelname)-5s  %(message)s',

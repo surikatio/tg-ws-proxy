@@ -128,6 +128,60 @@ class MsgSplitter:
         return packet_len
 
 
+async def passthrough(reader, writer, initial_data: bytes,
+                      dst: str, port: int, label: str) -> bool:
+    """
+    Relay a connection untouched to where it was originally headed.
+
+    In transparent mode netfilter redirects whole Telegram subnets here, and
+    not everything in them speaks MTProto — web/CDN traffic shares those
+    ranges. Rather than breaking it, hand it straight through.
+    """
+    try:
+        up_reader, up_writer = await asyncio.wait_for(
+            asyncio.open_connection(dst, port), timeout=10)
+    except Exception as exc:
+        log.warning("[%s] passthrough to %s:%d failed: %s",
+                    label, dst, port, repr(exc))
+        return False
+
+    log.debug("[%s] passthrough -> %s:%d", label, dst, port)
+    stats.connections_passthrough += 1
+
+    async def _relay(src, dst_w):
+        try:
+            while True:
+                chunk = await src.read(65536)
+                if not chunk:
+                    break
+                dst_w.write(chunk)
+                await dst_w.drain()
+        except (ConnectionError, OSError, asyncio.CancelledError):
+            pass
+        finally:
+            try:
+                dst_w.close()
+            except Exception:
+                pass
+
+    try:
+        if initial_data:
+            up_writer.write(initial_data)
+            await up_writer.drain()
+        await asyncio.gather(
+            _relay(reader, up_writer),
+            _relay(up_reader, writer),
+            return_exceptions=True,
+        )
+    finally:
+        for w in (writer, up_writer):
+            try:
+                w.close()
+            except Exception:
+                pass
+    return True
+
+
 async def do_fallback(reader, writer, relay_init, label,
                        dc: int, is_test_dc: bool, is_media: bool, media_tag: str,
                        ctx: CryptoCtx, splitter=None):
