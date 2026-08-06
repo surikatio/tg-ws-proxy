@@ -2,7 +2,7 @@ import socket as _socket
 import urllib.request
 import http.client
 
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from urllib.request import Request
 
 
@@ -67,6 +67,24 @@ def human_bytes(n: int) -> str:
             return f"{n:.1f}{unit}"
         n /= 1024  # type: ignore
     return f"{n:.1f}TB"
+
+
+def build_proxy_links(host: str, port: int, secret: str,
+                      fake_tls_domain: str = '') -> Tuple[str, str]:
+    """
+    Return (tg_link, tme_link) for the same proxy.
+
+    `tg://proxy` is what Telegram Desktop consumes locally, but it is not
+    clickable when forwarded into a chat — `https://t.me/proxy?...` is, and it
+    opens the same connect dialog. Hand the t.me one to other people.
+    """
+    link_host = get_link_host(host)
+    if fake_tls_domain:
+        secret_param = f"ee{secret}{fake_tls_domain.encode('ascii').hex()}"
+    else:
+        secret_param = f"dd{secret}"
+    query = f"server={link_host}&port={port}&secret={secret_param}"
+    return f"tg://proxy?{query}", f"https://t.me/proxy?{query}"
 
 
 def get_link_host(host: str) -> Optional[str]:

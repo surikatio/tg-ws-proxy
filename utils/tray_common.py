@@ -14,7 +14,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import psutil
 
-from proxy import __version__, get_link_host, parse_dc_ip_list, proxy_config, coerce_domain_list
+from proxy import __version__, parse_dc_ip_list, proxy_config, coerce_domain_list
+from proxy.utils import build_proxy_links
 from proxy.tg_ws_proxy import _run
 from utils.default_config import default_tray_config
 from utils.diagnostics import diagnose_listen_error
@@ -403,12 +404,25 @@ def restart_proxy(cfg: dict, on_error: Callable[[str], None]) -> None:
     start_proxy(cfg, on_error)
 
 
+def _proxy_links(cfg: dict) -> Tuple[str, str]:
+    return build_proxy_links(
+        cfg.get("host", DEFAULT_CONFIG["host"]),
+        cfg.get("port", DEFAULT_CONFIG["port"]),
+        cfg.get("secret", DEFAULT_CONFIG["secret"]),
+    )
+
+
 def tg_proxy_url(cfg: dict) -> str:
-    host = cfg.get("host", DEFAULT_CONFIG["host"])
-    port = cfg.get("port", DEFAULT_CONFIG["port"])
-    secret = cfg.get("secret", DEFAULT_CONFIG["secret"])
-    link_host = get_link_host(host)
-    return f"tg://proxy?server={link_host}&port={port}&secret=dd{secret}"
+    """tg:// link — opens the connect dialog on this machine."""
+    return _proxy_links(cfg)[0]
+
+
+def share_proxy_url(cfg: dict) -> str:
+    """
+    https://t.me/proxy link — unlike tg://, it stays clickable when sent to
+    someone in a Telegram chat, so this is the one to copy and hand out.
+    """
+    return _proxy_links(cfg)[1]
 
 
 def _has_ipv6() -> bool:

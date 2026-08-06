@@ -107,6 +107,7 @@ from utils.tray_common import (
     start_proxy,
     stop_proxy,
     tg_proxy_url,
+    share_proxy_url,
 )
 
 _tray_icon: Optional[Any] = None
@@ -212,7 +213,7 @@ def _on_open_in_telegram(icon=None, item=None) -> None:
 
 
 def _on_copy_link(icon=None, item=None) -> None:
-    url = tg_proxy_url(_config)
+    url = share_proxy_url(_config)
     try:
         if pyperclip is not None:
             pyperclip.copy(url)

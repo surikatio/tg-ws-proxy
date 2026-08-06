@@ -1,0 +1,41 @@
+[Unit]
+Description=TG WS Proxy (MTProto/WebSocket bridge for the local network)
+Documentation=https://github.com/Flowseal/tg-ws-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# DynamicUser gives the service its own throwaway account, and StateDirectory
+# creates /var/lib/tg-ws-proxy owned by it — that is where the secret lives, so
+# the link handed out to devices survives restarts.
+DynamicUser=yes
+StateDirectory=tg-ws-proxy
+StateDirectoryMode=0700
+
+ExecStart=/usr/local/bin/tg-ws-proxy --lan \
+    --secret-file /var/lib/tg-ws-proxy/secret \
+    --max-connections 512
+
+Restart=always
+RestartSec=3
+
+# The proxy only needs an unprivileged TCP port and outbound TLS.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

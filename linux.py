@@ -19,7 +19,7 @@ from utils.tray_common import (
     acquire_lock, bootstrap, check_ipv6_warning, ctk_run_dialog,
     ensure_ctk_thread, ensure_dirs, load_config, load_icon, log,
     maybe_notify_update, quit_ctk, release_lock, restart_proxy,
-    save_config, start_proxy, stop_proxy, tg_proxy_url,
+    save_config, start_proxy, stop_proxy, tg_proxy_url, share_proxy_url,
 )
 from ui.ctk_tray_ui import (
     install_tray_config_buttons, install_tray_config_form,
@@ -88,7 +88,7 @@ def _on_open_in_telegram(icon=None, item=None) -> None:
 
 
 def _on_copy_link(icon=None, item=None) -> None:
-    url = tg_proxy_url(_config)
+    url = share_proxy_url(_config)
     log.info("Copying link: %s", url)
     try:
         pyperclip.copy(url)
