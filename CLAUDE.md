@@ -26,6 +26,8 @@ python proxy/tg_ws_proxy.py -v   # запуск модуля напрямую (�
 
 Сборка бинарников — PyInstaller: `pyinstaller packaging/windows.spec --noconfirm` (аналогично `macos.spec` / `linux.spec`). CI (`.github/workflows/build.yml`) запускается только вручную (`workflow_dispatch`).
 
+Android (ветка `android`): `cd android && ./gradlew assembleDebug` либо `assembleRelease`. Собирать нужно из каталога без кириллицы в пути — см. раздел про Android ниже.
+
 Тестов в репозитории нет. Линтер — ruff, настройки в `pyproject.toml` (`ignore = ["F403", "F405"]`, потому что модули `proxy/` используют `from .utils import *`).
 
 ## Архитектура
@@ -71,6 +73,20 @@ Fronting (WSS с подменённым SNI `sprinthost.ru`) инкапсули�
 `ui/i18n` — простой JSON-словарь (`ru.json`, `en.json`), функция `t(key, **kwargs)`; язык определяется из системной локали при импорте. Новые строки UI добавлять в оба файла.
 
 Ключи `config.json` описаны в `docs/TrayConfig.md`; дефолты — в `utils/default_config.py`, оттуда они переносятся в `proxy_config` через `apply_proxy_config()`.
+
+### Android-приложение (`android/`)
+
+Ветка `android` добавляет приложение, где прокси работает на самом телефоне (`127.0.0.1:1443`). Протокол не переписан: Chaquopy запускает тот же пакет `proxy/`, а Gradle-таск `syncProxyCore` копирует его в сборку — второй копии в репозитории нет, правки в ядре действуют и на телефоне.
+
+- `android/app/src/main/python/proxy_bridge.py` — владеет event loop'ом и отдаёт наружу блокирующие `start` / `stop` / `status` / `link`; Kotlin не умеет управлять asyncio.
+- `ProxyService.kt` — foreground-сервис. Обязателен: Telegram держит долгоживущее соединение с локальным портом, а фоновый процесс Android заморозит за минуты, оборвав связь без видимой причины.
+- `Prefs.kt` — порт и постоянный секрет, чтобы настройка в Telegram переживала перезапуск.
+
+Зависимостей pip нет намеренно: колеса `cryptography` для Android не существует, вместо него работает бэкенд `javax.crypto` из `_aes.py`. Сборка поэтому не требует доступа к pypi.
+
+Подводные камни сборки (оба ловились на практике): AGP отказывается собирать из пути с не-ASCII символами — репозиторий лежит в каталоге с кириллицей, поэтому `android/` и `proxy/` копируются в путь вида `C:\build\`; в `local.properties` путь к SDK пишется через прямые слэши, иначе Java съедает `\U` и `\t` как escape-последовательности. `minSdk = 26` — ниже нельзя, сервис использует `startForegroundService()` и каналы уведомлений.
+
+Release-сборка подписывается ключом из `android/keystore.properties` (файл не в репозитории; шаблон — `keystore.properties.example`). Материалы для магазинов — в `android/store/`, там же `make_icons.py` и `README.md` с описанием, чем и как они собраны.
 
 ### Серверное развёртывание
 
