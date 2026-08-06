@@ -46,6 +46,26 @@ APK окажется в `android/app/build/outputs/apk/debug/`. Проще от�
 sdk.dir=C:/Users/<user>/AppData/Local/Android/Sdk
 ```
 
+### Подпись release-сборки
+
+Отладочная сборка подписывается ключом, общим для всех разработчиков, и Play Protect относится к ней строже. Для release нужен свой ключ:
+
+```bash
+keytool -genkeypair -keystore ~/tgwsproxy-release.jks -alias tgwsproxy \
+        -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Затем скопируйте `keystore.properties.example` в `android/keystore.properties` и заполните путь и пароли. Файл в `.gitignore` — в репозиторий он не попадёт. Без него `assembleRelease` тоже работает, просто откатывается на отладочную подпись.
+
+```bash
+./gradlew assembleRelease     # app/build/outputs/apk/release/
+```
+
+> [!CAUTION]
+> **Храните ключ и пароль.** Android разрешает обновление только сборкой с той же подписью. Потеряете ключ — новые версии придётся ставить через удаление приложения, а вместе с ним пропадёт сохранённый секрет и Telegram надо будет настраивать заново. По этой же причине версия с новой подписью не встанет поверх старой.
+
+Предупреждение об установке не из Play Store останется в любом случае — его убирает только публикация в Google Play.
+
 ### Почему нет зависимостей pip
 
 Колеса `cryptography` для Android не существует, а сборка из исходников требует Rust. Поэтому `proxy/_aes.py` получил третий бэкенд — через `javax.crypto`, который есть на любом Android-устройстве. Ядро выбирает его автоматически: `cryptography` → `javax.crypto` → системный `libcrypto`. Побочный плюс: сборке не нужен доступ к pypi.org.
