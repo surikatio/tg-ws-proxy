@@ -24,7 +24,10 @@ android {
 
     defaultConfig {
         applicationId = "org.tgwsproxy.android"
-        minSdk = 24
+        // 26, not lower: the service relies on startForegroundService() and
+        // notification channels, both introduced in Android 8.0. Declaring 24
+        // would let it install on Android 7 and then crash on start.
+        minSdk = 26
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
